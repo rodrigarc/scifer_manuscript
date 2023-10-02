@@ -1,0 +1,6 @@
+source("renv/activate.R")
+.Rproj.user
+data/
+results/
+!results/lab_book
+*.DS_Store

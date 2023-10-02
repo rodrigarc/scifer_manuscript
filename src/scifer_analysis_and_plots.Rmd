@@ -1,0 +1,843 @@
+---
+title: "scifer: an R/Bioconductor package for integrating B cell receptor Sanger sequencing and flow cytometry data"
+author: "Rodrigo Arcoverde Cerveira"
+date: '`r format(Sys.Date(), "%Y-%m-%d")`'
+output: 
+ html_document:
+    toc: true
+    depth: 2
+    toc_float: true
+    number_sections: true
+ github_document:
+    preview_html: false
+abstract: Here you will find all the bioinformatic analysis performed in this paper together with a description of each code chunk.
+knit: (function(inputFile, encoding) {
+          rmarkdown::render(inputFile,
+                            encoding = encoding, 
+                            output_file = paste0(Sys.Date(), "_",
+                              xfun::sans_ext(inputFile), ".html"),
+                                output_dir = "../results/lab_book/")})
+---
+
+```{r global.options, include=FALSE}
+#setting up figures and chunks messages
+
+knitr::opts_knit$set(echo = TRUE,
+                     fig.width = 6, fig.height = 5,
+                     fig.align = "center",
+                     root.dir = rprojroot::find_rstudio_root_file(),
+                     out.width = 768,
+                     fig.pos = "H",
+                     warning = FALSE, 
+                     message = FALSE)
+knitr::opts_chunk$set(warning = FALSE,
+                      message = FALSE,
+                      fig.width = 6, fig.height = 5,
+                     fig.align = "center",
+                     out.width = 768,
+                     fig.pos = "H")
+
+result.dir <- paste0("results/",Sys.Date(),"/")
+
+## creates result.dir with date in if not existent
+ifelse(isFALSE(dir.exists(paste0("../",result.dir))), dir.create(paste0("../",result.dir),recursive = TRUE),"Result directory for today exists already!")
+
+result.dir <- here::here(result.dir)
+data.dir <- here::here("data")
+
+options(stringsAsFactors = FALSE) 
+```
+
+# Load libraries
+
+This R code chunk is loading several libraries and defining a custom color palette. It begins by loading various R libraries, including `scifer`, `dplyr`, `cluster`, `factoextra`, `ggsci`, `tidyr`, `microbenchmark`, `ggpubr`, `rstatix`, and `ggprism`. These libraries provide various functions and tools for data manipulation, statistical analysis, and data visualization. Additionally, the code defines a custom color palette named color_palette
+
+```{r load_libraries}
+#Load libraries
+# if you do not have libraries, they are located in either CRAN or Bioconductor
+# libraries should be able to be automatically retrieved using renv::restore() function.
+library(scifer)
+library(dplyr)
+library(cluster)
+library(factoextra)
+library(ggsci)
+library(tidyr)
+library(microbenchmark)
+library(ggpubr)
+library(rstatix)
+library(ggprism)
+
+color_palette <- c("1" = "#4DBBD5B2", "2" = "#DC0000B2", "High quality" = "#4DBBD5B2", "Low quality" = "#DC0000B2", "scifer" = "#4DBBD5B2", "unprocessed" = "#DC0000B2", "filtered_out" = "grey20", "phred30" = "grey90")
+
+```
+
+# Process heavy and light chain data
+
+This R code chunk processes heavy and light chain sequencing data. It calculates quality summaries for sequences located in a specified folder and saves these summaries as a compressed RDS file named "hc_quality_table.rds" in a data directory, which should be defined elsewhere in the code.
+
+```{r process_sanger, eval=FALSE}
+file_location <- sub("/src", "",getwd())
+hc_quality <- summarise_quality(folder_sequences = paste0(file_location,"/data/HC_raw_ab1_files"), processors = NULL)
+
+hc_quality$summaries %>% 
+  select(-file.path) %>%
+  saveRDS(file = paste0(data.dir, "/processed_data/hc_quality_table.rds"), compress = "gzip")
+```
+
+# Load processed data
+
+Previously processed data is loaded to avoid redundant computations. It reads in a processed quality table stored as an RDS file and removes any rows with missing values. Additionally, it loads data from two separate files, "scifer_assigned.tsv.gz" and "unprocessed_assigned.tsv.gz," both in tab-separated format, likely containing alignment results or assignments.
+
+```{r load_processed_data}
+# read rds data
+hc_quality_table <- readRDS(here::here("data/processed_data/hc_quality_table.rds"))
+# remove NAs
+hc_quality_table <- na.omit(hc_quality_table)
+# read IgBlast output from scifer filtered sequences
+scifer_aligned <- read.table(here::here("data/processed_data/scifer_assigned.tsv.gz"), sep = "\t", header = TRUE)
+# read IgBlast output from unfiltered sequences
+unprocessed_aligned <- read.table(here::here("data/processed_data/unprocessed_assigned.tsv.gz"), sep = "\t", header = TRUE)
+```
+
+# Unsupervised clustering based on quality properties
+
+First the numbers of clusters were decided based on the Silhouette method. The average silhouette measures the quality of each clusters based on well each each sample fits in a given cluster. Higher this metric, better the clustering. As seen below, the optimal number of clusters based on this method was 2. This also facilitates the separation of "high quality" and "low quality" sequences between two clusters.
+
+```{r clustering}
+# scale variables prior clustering
+scaled_table <- scale(hc_quality_table[,-c(1,2)])
+
+# identify optimal number of clusters
+fviz_nbclust(scaled_table[,-c(1,2)], kmeans, method = "silhouette") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12)) 
+  
+ggsave(path = result.dir, filename = "silhouette_optimal_clusters.pdf", height = 5, width = 5)
+
+clusters_table <- kmeans(scaled_table[,-c(1,2)], centers = 2, nstart = 25)
+
+hc_quality_cluster <- cbind(hc_quality_table, cluster = clusters_table$cluster)
+```
+
+## Principal component analysis (PCA)
+
+This code chunk performs Principal Component Analysis (PCA) on the data, with colors assigned based on k-means clustering. It begins by processing and scaling the data for PCA, excluding specific columns. Then, it generates a PCA scatterplot using the `fviz_pca_ind` function, with data points colored and shaped according to clustering information. The color palette is customized, and various themes are applied to the plot's appearance. Finally, the resulting plot is saved as a PDF file with specified dimensions and file name.
+
+```{r pca_ind}
+# process and scale data for PCA
+qual_param_pca <- hc_quality_cluster %>%
+  select(-c("folder.name", "file.name", "cluster")) %>%
+  prcomp(scale = TRUE)
+
+fviz_pca_ind(qual_param_pca, geom = "point", 
+             habillage=hc_quality_cluster$cluster) +
+  labs(color = "Clusters", shape = "Clusters", fill = "Clusters") +
+  scale_color_manual(values = color_palette) +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12))
+
+ggsave(path = result.dir,filename = "pca_optimal_clusters.pdf", height = 5, width = 5)
+```
+
+## Variable contribuations to each PC
+
+This code section visualizes the contributions of variables to each Principal Component (PC). It starts by plotting the top 10 contributors to PC1, with custom styling and themes applied. The resulting plot is saved as "pca_dim1_contrib.pdf" Next, it does the same for PC2, generating a plot for the top contributors and saving it as "pca_dim2_contrib.pdf" with specified dimensions and file names.
+
+```{r pca_var_cont}
+# contributions of PC1
+fviz_pca_contrib(qual_param_pca, axes = 1, top = 10, choice = "var", color = "black") +
+  labs(x = "") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+ggsave(path = result.dir, filename = "pca_dim1_contrib.pdf", height = 5, width = 5)
+
+# contributions of PC2
+fviz_pca_contrib(qual_param_pca, axes = 2, top = 10, choice = "var", color = "black") +
+  labs(x = "") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+ggsave(path = result.dir,filename = "pca_dim2_contrib.pdf", height = 5, width = 5)
+```
+
+## Variable contributions for PCA
+
+Variable contributions for the entire Principal Component Analysis (PCA) are visualized. It creates a plot that displays the contributions of variables to all PCs.
+
+```{r pca_var_all}
+fviz_pca_var(qual_param_pca) +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12))
+
+ggsave(path = result.dir,filename = "pca_var_vectors_contrib.pdf", height = 5, width = 5)
+```
+
+# Set filtering parameter values
+
+## Select parameters to filter
+
+The code calculates summary statistics for each quality parameter within different clusters, specifically computing the mean and standard deviation. These statistics are generated to establish filtering criteria, the `mean±3SD` for each cluster was taken into account to capture at least 99% of all cluster members. However, this code does not include explicit filtering actions; it only prepares summary information for further decision-making regarding data filtering.
+
+```{r filter_param_final}
+# print summary information about each cluster parameters
+qual_cluster_summ <- hc_quality_cluster %>%
+  as.data.frame() %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), list(mean = mean, sd = sd))) %>%
+  select(-(2:5))
+# print summary information about each cluster parameters
+qual_cluster_summ %>%
+  summarise(cluster = cluster,
+            trimmed_length =  trimmed.length_mean - 3*trimmed.length_sd,
+            length_lower = raw.length_mean - 3*raw.length_sd,
+            trim_start = trim.start_mean + 3*trim.start_sd,
+            trim_finish = trim.finish_mean - 3*trim.finish_sd,
+            phred_score = trimmed.mean.quality_mean - 3*trimmed.mean.quality_sd)
+  
+```
+
+## Plot filters selected
+
+### Length filter
+
+t first calculates and visualizes the "Length filter" based on the raw sequence length. Sequences are categorized as "High quality" or "Low quality" depending on whether they exceed a length threshold of `343`. The resulting histogram is colored according to a custom palette, with a dashed vertical line at the threshold. The plot is saved as "length_filter.pdf" with specified dimensions and file name.
+
+```{r}
+hc_quality_table %>%
+  mutate(filtered = ifelse(raw.length > 343, "High quality", "Low quality")) %>%
+  ggplot(aes(x = raw.length, groups = filtered, fill = filtered)) +
+  geom_histogram(binwidth = 10, color = "black") +
+  scale_fill_manual(values = color_palette) +
+  labs(x = "Raw sequence length", y = "Count", title = "Length") +
+  geom_vline(linetype = "dashed", color = "#4DBBD5B2", xintercept = 343) +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12)) 
+
+ggsave(path = result.dir,filename = "length_filter.pdf", height = 5, width = 5)
+```
+
+### Contiguous quality filter
+
+This code section contains code for plotting the "Contiguous quality filter." It visualizes the distribution of trimming positions based on quality criteria. Trimming positions are categorized as "High quality" or "Low quality" based on specified thresholds (`65` and `400`). The resulting histogram is colored according to a custom palette and includes dashed vertical lines at the threshold values. The plot is saved as "trimm_values_filter.pdf" with specified dimensions and file name.
+
+```{r}
+hc_quality_table %>%
+  pivot_longer(c(trim.start, trim.finish), names_to = "trimming", values_to = "trimm_values") %>% 
+  mutate(filtered = ifelse(trimm_values < 65|trimm_values > 400, "High quality", "Low quality")) %>%
+  ggplot(aes(x = trimm_values, group = filtered, fill = filtered)) +
+  geom_histogram(binwidth = 15, color = "black") +
+  geom_vline(linetype = "dashed", color = "#4DBBD5B2", xintercept = 65) +
+  geom_vline(linetype = "dashed", color = "#4DBBD5B2", xintercept = 400) +
+  scale_fill_manual(values = color_palette) +
+  labs(x = "Sequence trimming positions", y = "Count", title = "Trimming positions") +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 4200)) +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12)) 
+
+ggsave(path = result.dir, filename = "trimm_values_filter.pdf", height = 5, width = 5)
+  
+```
+
+### Phred quality score filter
+
+This section creates a histogram displaying the distribution of Phred quality scores after trimming, categorizing them as "High quality" or "Low quality" based on a threshold of `30`. Dashed vertical lines mark the threshold, and the plot is colored using a custom palette. The resulting visualization is saved as "phred_score_filter.pdf" with specified dimensions and file name.
+
+```{r phred_filter}
+hc_quality_table %>%
+  mutate(filtered = ifelse(trimmed.mean.quality > 30, "High quality", "Low quality")) %>%
+  ggplot(aes(x = trimmed.mean.quality, group = filtered, fill = filtered)) +
+  geom_histogram(color = "black") +
+  geom_vline(linetype = "dashed", color = "#4DBBD5B2", xintercept = 30) +
+  scale_fill_manual(values = color_palette) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1000)) +
+  labs(x = "Phred score (after trimming)", y = "Count", title = "Basecall quality") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12)) 
+
+ggsave(path = result.dir,filename = "phred_score_filter.pdf", height = 5, width = 5)
+```
+
+### Heavy chain complemenratiry determining region 3 (HCDR3) filter
+
+This section performs data processing related to HCDR3 regions. It identifies secondary peaks within the sequencing data and filters them based on position criteria. The resulting data is integrated with the `hc_quality_cluster` dataframe, and the combined data is saved as "hc_quality_full_table.csv" in the specified directory. Here the HCDR3 is defined by the user as within the position to `100` from `150`. However, to speed up the analysis, this chunk was run once and the output was saved to be used on the chunk below.
+
+```{r hcdr3, eval=FALSE}
+file_locations <- list.files(path = paste0(data.dir, "/HC_raw_ab1_files"),recursive = T, full.names = T)
+sangerseqlisted <- sapply(file_locations, sangerseqR::readsangerseq)
+sp <- lapply(sangerseqlisted, secondary_peaks, ratio = 0.33, processors = NULL)
+df <- lapply(sp, function(x) x[["secondary.peaks"]])
+df <- lapply(df, function(x) filter(x, position > 100 & position < 150))
+df <- lapply(df, function(x) ifelse(nrow(x) > 0, nrow(x), 0))
+df <- tibble(sec.peak.CDR3=as.numeric(as.character(df)), file.path=names(df))
+
+hc_quality_cluster <- 
+  df %>%
+    separate(file.path, into = c("_1", "_2","_3","folder.name", "file.name"), sep = "/") %>% 
+    select(-c("_1", "_2","_3")) %>%
+    right_join(hc_quality_cluster %>% mutate(folder.name = gsub("_HC", "",folder.name)), by = c("folder.name", "file.name"))
+
+write.csv(hc_quality_cluster, paste0(data.dir, "/processed_data/hc_quality_full_table.csv"),row.names = FALSE)
+```
+
+Processes and plots data related to the HCDR3 region from the output of the chunk above. It begins by reading a CSV file, making various data transformations, and filtering for sequences with the highest raw mean quality. Then, it creates a histogram plot of the secondary peaks (HCDR3) with a threshold line at 5. The plot is styled with custom themes, and the resulting visualization is saved as "cdr3_filter.pdf" with specified dimensions and file name.
+
+```{r cdr3_plot}
+hc_quality_cluster <- read.csv(paste0(data.dir, "/processed_data/hc_quality_full_table.csv")) %>%
+  mutate(plate = sub("_HC", "",folder.name),
+         well = gsub("\\-.*|\\_.*", "", file.name),
+         well_number = gsub("[a-zA-Z]", "", well),
+         well_letter = gsub("[[:digit:]]", "", well),
+         well = paste0(well_letter, sprintf("%02s", well_number)),
+         ID = gsub("\\-.*|\\_.*", "", folder.name),
+         sequence_id = sub("_R", "", paste(plate, well, sep = "_"))) %>%
+  select(-c(well_number, well_letter, plate, well, ID)) %>%
+  group_by(sequence_id) %>%
+  filter(raw.mean.quality == max(raw.mean.quality)) %>%
+  ungroup() 
+
+hc_quality_cluster %>%
+  mutate(filtered = ifelse(sec.peak.CDR3 <= 5, "High quality", "Low quality")) %>%
+  ggplot(aes(x = sec.peak.CDR3, group = filtered, fill = filtered)) +
+  geom_histogram(color = "black") +
+  geom_vline(linetype = "dashed", color = "#4DBBD5B2", xintercept = 5) +
+  scale_fill_manual(values = color_palette) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 3400)) +
+  labs(x = "Secondary peaks (HCDR3)", y = "Count", title = "HCDR3 quality") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12)) 
+
+ggsave(path = result.dir,filename = "cdr3_filter.pdf", height = 5, width = 5)
+
+```
+
+## Comparing filtered and non-filtered files
+
+### Principal component analysis
+
+Here a comparison is made between filtered `scifer` and non-filtered sequences. It starts by adding a "filter" column to the `hc_quality_cluster` dataframe based on specified quality criteria. Then, it performs PCA on the filtered data, excluding certain columns. The resulting PCA scatterplot is colored based on the "High quality" or "Low quality" using all filters set up in the previously.
+
+```{r pca}
+hc_quality_cluster <- hc_quality_cluster %>%
+  mutate(filter = ifelse( trimmed.length >= 343 &
+                          trim.finish >= 400 &
+                            trimmed.mean.quality >= 30 &
+                           trim.start <= 65 & 
+                          sec.peak.CDR3 <= 5,
+                          "High quality", "Low quality"))
+
+qual_final_pca <- hc_quality_cluster %>%
+  select(-c("folder.name", "file.name", "cluster", "filter", "sequence_id")) %>%
+  prcomp(scale = TRUE)
+
+fviz_pca_ind(qual_final_pca, geom = "point", 
+             habillage=hc_quality_cluster$filter) +
+  scale_color_manual(values = color_palette) +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12))
+
+ggsave(path = result.dir,filename = "pca_final_filtered.pdf", height = 5, width = 5)
+```
+
+# Processing speed
+
+Here it was evaluated the processing speed of different sequence counts under various parallelization settings. It first defines folders for different sequence counts, then measures the processing time using the `microbenchmark` package, both in sequential and parallel modes. The results are saved as "parallelization_comp.csv". The first code chunk was run only once and the output was saved for plotting to speed up the analysis.
+
+```{r speed_calc, eval=FALSE}
+folder_1seq <- paste0(data.dir,"/HC_raw_ab1_speed/seq_1")
+folder_10seq <- paste0(data.dir, "/HC_raw_ab1_speed/seq_10")
+folder_100seq <- paste0(data.dir, "/HC_raw_ab1_speed/seq_100")
+folder_1000seq <- paste0(data.dir, "/HC_raw_ab1_speed/seq_1000")
+
+mbm <- microbenchmark(
+  sequence_1 = summarise_quality(folder_1seq, processors = 1),
+  sequence_10 = summarise_quality(folder_10seq, processors = 1),
+  sequence_100 = summarise_quality(folder_100seq, processors = 1),
+  sequence_1000 = summarise_quality(folder_1000seq, processors = 1),
+  sequence_1_parallel = summarise_quality(folder_1seq, processors = 8),
+  sequence_10_parallel = summarise_quality(folder_10seq, processors = 8),
+  sequence_100_parallel = summarise_quality(folder_100seq, processors = 8),
+  sequence_1000_parallel = summarise_quality(folder_1000seq, processors = 8),
+  times = 2
+)
+
+nanosec_to_sec <- function(nanoseconds) {
+  seconds <- nanoseconds / 1e9
+  return(seconds)
+}
+
+mbm <- mbm %>%
+  separate(expr, into = c("x", "number_seqs", "parallelization")) %>%
+  mutate(processing = ifelse(is.na(parallelization), "sequential", "parallel"),
+         time_seconds = nanosec_to_sec(time)) %>%
+  select(-c(parallelization,x))
+
+write.csv(mbm, paste0(data.dir, "/processed_data/parallelization_comp.csv"),row.names = FALSE)
+
+```
+
+This code section reads the previously saved data and generates a plot comparing processing time for different sequence counts and parallelization settings. The plot shows mean processing times, error bars, and scaling of the x-axis.
+
+```{r plot_parallelizing}
+
+mbm <- read.csv(paste0(data.dir,"/processed_data/parallelization_comp.csv"))
+
+mbm %>%
+  group_by(processing, number_seqs) %>%
+  summarise(mean_time = mean(time_seconds),
+            sd_time = sd(time_seconds)) %>%
+  ungroup() %>%
+  ggplot(aes(x = number_seqs, y = mean_time, group = processing, color = processing)) +
+  geom_point() +
+  geom_line() +
+  scale_x_log10() +
+  geom_errorbar(aes(ymin=mean_time-sd_time, ymax=mean_time+sd_time), width=.2) +
+  theme(legend.position = "top") +
+  labs(x = "Sequence counts", y = "Time (seconds)", groups = "Processing", color = "Processing",  title = "Processing speed") + 
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12)) +
+  scale_color_d3()
+
+ggsave(path = result.dir, filename = "processing_speed.pdf", height = 5, width = 5)
+
+```
+
+# Compare Scifer impact after alignment
+
+This code portion begings by reading and processing AB1 files, converting them to FASTA format while filtering out repeated and low-quality sequences. These processed sequences are saved as "unprocessed_sequences.fasta". The `quality_report()` wrapper function is used on a set of sequences, with both flow cytometry index sort data and Sanger sequences. This function assess sequence quality and merge it with flow cytometry data, generating an HTML report named "QC-report.html" and saving it to a specified output directory.
+
+```{r aligned_seqs, eval=FALSE}
+# read ab1 files and save fasta withour processing
+list_ab1 <- list.files(paste0(data.dir,"/HC_raw_ab1_files"), full.names = TRUE, recursive = TRUE)
+names_list <- lapply(list_ab1, function(x){
+  name <- strsplit(x, split = "/")
+  name_plate <- name[[1]][[4]]
+  well_row <- stringr::str_match(name[[1]][[5]], "^(.)[0-9]+-")[, 2]
+  well_column <- sprintf("%02d",as.numeric(stringr::str_match(name[[1]][[5]], "([0-9]+)-")[, 2]))
+  name <- paste(name_plate, paste0(well_row, well_column), collapse = "", sep = "_")
+  return(name)
+})
+list_sangerseq <- parallel::mclapply(list_ab1, sangerseqR::readsangerseq, mc.cores = 7)
+list_sangerseq <- parallel::mclapply(list_sangerseq, sangerseqR::primarySeq, mc.cores = 7)
+names(list_sangerseq) <- unlist(names_list)
+
+unprocessed_fasta <- Biostrings::BStringSet(list_sangerseq)
+# remove repeated sequences and unknown specificity
+unprocessed_fasta <- unprocessed_fasta[!grepl("_R_", names(unprocessed_fasta))]
+unprocessed_fasta <- unprocessed_fasta[!grepl("_NA", names(unprocessed_fasta))]
+Biostrings::writeXStringSet(unprocessed_fasta, paste0(data.dir,"/unprocessed/unprocessed_sequences.fasta"))
+
+# run quality_report function to filter High quality and merge with flow data
+quality_report(
+    folder_sequences = "~/OneDrive - Karolinska Institutet/projects/r-package/scifer_manuscript/data/HC_raw_ab1_files/",
+    outputfile = "QC-report.html",
+    output_dir = "~/OneDrive - Karolinska Institutet/projects/r-package/scifer_manuscript/results/2023-07-20/",
+    folder_path_fcs = "~/OneDrive - Karolinska Institutet/projects/r-package/scifer_manuscript/data/flow_cytometry/KI" , compensation = TRUE, plate_wells = "96",
+    probe1 = "Pre.F", probe2 = "Post.F",
+    posvalue_probe1 = 600, posvalue_probe2 = 400,
+    cdr3_start = 100,
+    cdr3_end = 150
+)
+
+```
+
+## Sequences were aligned using IgBlast
+
+IgBlast was used within the IgDiscover software (v. 0.15). Below is an example bash code to demonstrate how it was run. To avoid time-consuming IgBlast gene assignment/alignment, we have saved the results and used as input. The processed sequences are loaded in the [Load processed data](#load-processed-data) section.
+
+```{bash example_code_igdiscover, eval = FALSE}
+# enter correct results folder generated within R
+current_date=$(date "+%Y-%m-%d")
+cd results/$current_date
+
+# run igdiscover init for unprocessed sequences
+igdiscover init --database data/database/KIMDB_rm --single-reads ../../data/unprocessed/unprocessed_sequences.fasta unprocessed_seqs_igblast
+# run igdiscover/IgBlast
+cd unprocessed_seqs_igblast && igdiscover run
+# run igdiscover init for scifer-filtered sequences
+igdiscover init --database data/database/KIMDB_rm --single-reads ../../data/scifer_filtered_sequences.fasta scifer_seqs_igblast
+# run igdiscover/IgBlast
+cd scifer_seqs_igblast && igdiscover run
+```
+
+## Alignment score comparison between different control groups
+
+The alignment quality of sequencing data is compared across different preprocessing methods, including "scifer," "phred30," "unprocessed," and "filtered_out." The alignment scores for genes V, D, and J are analyzed using one-way ANOVA and post-hoc Tukey tests. Cohen's effect size is also calculated, and the results are visualized with violin plots.
+
+```{r alignment_score_plot}
+
+merged_datasets <- data.table::rbindlist(list(scifer = scifer_aligned,
+                                              phred30 = unprocessed_aligned[unprocessed_aligned$sequence_id %in% (hc_quality_cluster %>% filter(trimmed.mean.quality > 30) %>% pull(sequence_id)),],
+                                              unprocessed = unprocessed_aligned,
+                                              filtered_out = unprocessed_aligned[!(unprocessed_aligned$sequence_id %in% sub("_[^_]*$", "", scifer_aligned$sequence_id)),]), 
+                                         idcol = TRUE) %>%
+  rename(preprocessing = .id) %>%
+  pivot_longer(cols = c("v_score", "j_score", "d_score"), 
+               names_to = "gene_score", 
+               values_to = "alignment_score") %>% 
+  mutate(gene_score = plyr::mapvalues(gene_score, 
+                                      from = c("v_score", "d_score", "j_score"),
+                                      to = c("HV gene", "HD gene", "HJ gene")),
+         gene_score = factor(gene_score, levels = c("HV gene", "HD gene", "HJ gene")),
+         preprocessing = factor(preprocessing, levels = c("scifer", "phred30","unprocessed", "filtered_out")))
+
+# One way-anova to check if there is a difference between groups
+anova <- merged_datasets %>%
+  group_by(gene_score) %>%
+          anova_test(formula = alignment_score ~ preprocessing) 
+anova
+
+# The two-tailed post-hoc Tukey test with an FDR correction is run 
+stat.test <- merged_datasets %>%
+  group_by(gene_score) %>%
+          tukey_hsd(formula = alignment_score ~ preprocessing, 
+                     p.adjust.method = "fdr") %>%
+  add_xy_position(x = "preprocessing") %>%
+  mutate(p.adj = ifelse(p.adj <= 0.00001, "< 0.0001", round(p.adj, 4)))
+
+# The effect size was calculated using Cohen's method
+stat.effectsize <- merged_datasets %>%
+  group_by(gene_score) %>%
+              cohens_d(formula = alignment_score ~ preprocessing)
+
+# Staltistical results are merged in a single object
+stats <- left_join(stat.test, stat.effectsize, 
+                   by = c("group1","group2","gene_score")) %>%
+  mutate(effsize = paste0(p.adj.signif,", ","d = ",abs(round(effsize, 2))))
+
+merged_datasets %>%
+  ggpubr::ggviolin(y = "alignment_score", x = "preprocessing", facet.by = "gene_score",legend = "none", fill = "preprocessing") +
+  geom_boxplot(aes(fill = preprocessing),outlier.shape = NA, width = 0.10, color = "black", alpha = 0.2) +
+  stat_pvalue_manual(stats, label = "effsize", step.increase = .01) +
+  scale_fill_manual(values = color_palette) +
+  scale_y_continuous(limits = c(0,1000) , expand = c(0,0)) +
+  labs(x = "", y = "Alignment score") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        legend.position = "none")
+
+ggsave(path = result.dir,filename = "alignment_score_phred30.pdf", height = 5, width = 5)
+
+```
+
+## Alignment score comparison between scifer and unprocessed sequences
+
+The alignment score comparison, focusing on the "scifer" and "unprocessed" preprocessing methods for genes V, D, and J. Two-tailed Student's t-tests with FDR correction are performed, and Cohen's effect size is calculated. The results are visualized using violin plots.
+ 
+```{r alignment_score_phred}
+
+merged_datasets <- data.table::rbindlist(list(scifer = scifer_aligned,
+                                              unprocessed = unprocessed_aligned), 
+                                         idcol = TRUE) %>%
+  rename(preprocessing = .id) %>%
+  pivot_longer(cols = c("v_score", "j_score", "d_score"), 
+               names_to = "gene_score", 
+               values_to = "alignment_score") %>% 
+  mutate(gene_score = plyr::mapvalues(gene_score, 
+                                      from = c("v_score", "d_score", "j_score"),
+                                      to = c("HV gene", "HD gene", "HJ gene")),
+         gene_score = factor(gene_score, levels = c("HV gene", "HD gene", "HJ gene")),
+         comparator_score = paste(preprocessing, gene_score, sep = "_"))
+
+# set comparisons
+
+my_comparisons <- list(c("scifer", "unprocessed"))
+my_comparisons <- c(lapply(my_comparisons, paste0, "_HV gene"),
+                    lapply(my_comparisons, paste0, "_HD gene"),
+                    lapply(my_comparisons, paste0, "_HJ gene"))
+
+# The two-tailed Student's t-test with an FDR correction is run 
+stat.test <- merged_datasets %>%
+  group_by(gene_score) %>%
+              t_test(formula = alignment_score ~ preprocessing, 
+                     paired = FALSE,
+                     comparisons = my_comparisons,
+                     p.adjust.method = "fdr") %>%
+  add_xy_position(x = "preprocessing") %>%
+  mutate(p = ifelse(p <= 0.00001, "< 0.0001",p))
+
+# The effect size was calculated using Cohen's method
+stat.effectsize <- merged_datasets %>%
+  group_by(gene_score) %>%
+              cohens_d(formula = alignment_score ~ preprocessing,
+                       comparisons = my_comparisons,
+                       paired = FALSE)
+
+# Staltistical results are merged in a single object
+stats <- left_join(stat.test, stat.effectsize, 
+                   by = c("group1","group2", ".y.", "n1", "n2", "gene_score")) %>%
+  mutate(effsize = paste0("p ",p,", ","d = ",round(effsize, 2)))
+
+merged_datasets %>%
+  ggpubr::ggviolin(y = "alignment_score", x = "preprocessing", facet.by = "gene_score",legend = "none", fill = "preprocessing") +
+  geom_boxplot(aes(fill = preprocessing),outlier.shape = NA, width = 0.10, color = "black", alpha = 0.2) +
+  stat_pvalue_manual(stats, label = "effsize", y.position = 550) +
+  scale_fill_manual(values = color_palette) +
+  scale_y_continuous(limits = c(0,600) , expand = c(0,0)) +
+  labs(x = "", y = "Alignment score") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        legend.position = "none")
+
+ggsave(path = result.dir, filename = "alignment_score_phred.pdf", height = 5, width = 5)
+
+```
+
+## Gene coverage comparison
+
+This section compares gene coverage for the "scifer" and "unprocessed" preprocessing methods. It calculates coverage for genes V, D, and J. Two-tailed Student's t-test FDR correction is performed and Cohen's effect size is calculated. The results are presented using violin plots.
+
+```{r gene_coverage_plot}
+
+merged_datasets <- data.table::rbindlist(list(scifer = scifer_aligned,
+                           unprocessed = unprocessed_aligned), idcol = TRUE) %>%
+  rename(preprocessing = .id) %>% 
+  pivot_longer(cols = c("V_covered", "J_covered", "D_covered"), 
+               names_to = "gene_covered", 
+               values_to = "alignment_covered") %>%
+  mutate(gene_covered = plyr::mapvalues(gene_covered, 
+                                      from = c("V_covered", "D_covered", "J_covered"),
+                                      to = c("HV gene", "HD gene", "HJ gene")),
+         gene_covered = factor(gene_covered, levels = c("HV gene", "HD gene", "HJ gene")),
+         comparator_covered = paste(preprocessing, gene_covered, sep = "_"))
+
+
+# set comparisons
+
+my_comparisons <- list(c("scifer", "unprocessed"))
+my_comparisons <- c(lapply(my_comparisons, paste0, "_HV gene"),
+                    lapply(my_comparisons, paste0, "_HD gene"),
+                    lapply(my_comparisons, paste0, "_HJ gene"))
+
+
+
+# The two-tailed Student's t-test with an FDR correction is run 
+stat.test <- merged_datasets %>%
+  group_by(gene_covered) %>%
+              t_test(formula = alignment_covered ~ preprocessing, 
+                     paired = FALSE,
+                     comparisons = my_comparisons,
+                     p.adjust.method = "fdr") %>%
+  add_xy_position(x = "preprocessing") %>%
+  mutate(p = ifelse(p <= 0.00001, "< 0.0001",p))
+
+# The effect size was calculated using Cohen's method
+stat.effectsize <- merged_datasets %>%
+  group_by(gene_covered) %>%
+              cohens_d(formula = alignment_covered ~ preprocessing,
+                       comparisons = my_comparisons,
+                       paired = FALSE)
+
+# Staltistical results are merged in a single object
+stats <- left_join(stat.test, stat.effectsize, 
+                   by = c("group1","group2", ".y.", "n1", "n2", "gene_covered")) %>%
+  mutate(effsize = paste0("p ",p,", ","d = ",round(effsize, 2)))
+
+merged_datasets %>%
+  ggpubr::ggviolin(y = "alignment_covered", x = "preprocessing", facet.by = "gene_covered",legend = "none", fill = "preprocessing") +
+  geom_boxplot(aes(fill = preprocessing),outlier.shape = NA, width = 0.10, color = "black", alpha = 0.2) +
+  stat_pvalue_manual(stats, label = "effsize", y.position = 115) +
+  scale_fill_manual(values = color_palette) +
+  scale_y_continuous(limits = c(0,130) , expand = c(0,0), breaks = seq(0, 100,25)) +
+  labs(x = "", y = "Alignment coverage") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        legend.position = "none")
+
+ggsave(path = result.dir,filename = "gene_coverage.pdf", height = 5, width = 5)
+
+```
+
+## Somatic hypermutation comparison
+
+This code chunk analyzes somatic hypermutation (SHM) in genes V for the "scifer" and "unprocessed" preprocessing methods. Two-tailed Student's t-test is performed and Cohen's effect size is calculated. The results are visualized with violin plots.
+
+```{r shm_plot}
+
+merged_datasets <- data.table::rbindlist(list(scifer = scifer_aligned,
+                           unprocessed = unprocessed_aligned), idcol = TRUE) %>%
+  rename(preprocessing = .id)
+
+# set comparisons
+
+my_comparisons <- list(c("scifer", "unprocessed"))
+
+# The two-tailed Student's t-test with an FDR correction is run 
+stat.test <- merged_datasets %>%
+              t_test(formula = V_SHM ~ preprocessing, 
+                     paired = FALSE,
+                     comparisons = my_comparisons,
+                     p.adjust.method = "fdr") %>%
+  add_xy_position(x = "preprocessing") %>%
+  mutate(p = ifelse(p <= 0.00001, "< 0.0001",p))
+
+# The effect size was calculated using Cohen's method
+stat.effectsize <- merged_datasets %>%
+              cohens_d(formula = V_SHM ~ preprocessing,
+                       comparisons = my_comparisons,
+                       paired = FALSE)
+
+# Staltistical results are merged in a single object
+stats <- left_join(stat.test, stat.effectsize, 
+                   by = c("group1","group2", ".y.", "n1", "n2")) %>%
+  mutate(effsize = paste0("p ",p,", ","d = ",abs(round(effsize, 2))))
+
+merged_datasets %>%
+  ggpubr::ggviolin(y = "V_SHM", x = "preprocessing", 
+                   legend = "none", 
+                   fill = "preprocessing") +
+  geom_boxplot(aes(fill = preprocessing),outlier.shape = NA, width = 0.10, color = "black", alpha = 0.2) +
+  stat_pvalue_manual(stats, label = "effsize", y.position = 55) +
+  scale_fill_manual(values = color_palette) +
+  scale_y_continuous(limits = c(0,60) , expand = c(0,0)) +
+  labs(x = "", y = "HV gene mutation (%)") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+ggsave(path = result.dir,filename = "HV_gene_mutation.pdf", height = 5, width = 5)
+
+```
+
+## Correlation of somatic hypermutation and alignment quality
+
+This section explores the correlation between somatic hypermutation and alignment quality for different preprocessing methods and gene segments (HV, HD, HJ). It calculates Pearson correlation coefficients and presents the results using facet-wrapped scatter plots.
+
+```{r corr_mutations_score}
+
+merged_datasets <- data.table::rbindlist(list(scifer = scifer_aligned,
+                           unprocessed = unprocessed_aligned), idcol = "preprocessing") %>%
+  pivot_longer(cols = c("v_score", "j_score", "d_score"), 
+               names_to = "gene_score", 
+               values_to = "alignment_score") %>% 
+   pivot_longer(cols = c("V_errors", "D_errors", "J_errors"), 
+               names_to = "gene_mutations", 
+               values_to = "number_mutations") %>% 
+  mutate(gene_score = plyr::mapvalues(gene_score, 
+                                      from = c("v_score", "d_score", "j_score"),
+                                      to = c("HV gene", "HD gene", "HJ gene")),
+         gene_score = factor(gene_score, levels = c("HV gene", "HD gene", "HJ gene")),
+         gene_mutations = plyr::mapvalues(gene_mutations, 
+                                      from = c("V_errors", "D_errors", "J_errors"),
+                                      to = c("HV mutations", "HD mutations", "HJ mutations")),
+         gene_mutations = factor(gene_mutations, levels = c("HV mutations", "HD mutations", "HJ mutations")))
+
+# Define the combinations to keep
+combinations_to_keep <- data.frame(
+  preprocessing = c("scifer", "unprocessed"),
+  gene_score = c("HV gene", "HV gene", "HJ gene", "HJ gene", "HD gene", "HD gene"),
+  gene_mutations = c("HV mutations", "HV mutations", "HJ mutations", "HJ mutations", "HD mutations", "HD mutations")
+)
+
+# Join the combinations to keep with the original dataset
+filtered_datasets <- merge(combinations_to_keep, merged_datasets, by = c("preprocessing", "gene_score", "gene_mutations"), all.x = TRUE) %>%
+  mutate(
+    perc_mutations = case_when(
+    gene_score == "HV gene" ~ (number_mutations/(v_sequence_end-v_sequence_start))*100,
+    gene_score == "HD gene" ~ (number_mutations/(d_sequence_end-d_sequence_start))*100,
+    gene_score == "HJ gene" ~ (number_mutations/(j_sequence_end-j_sequence_start))*100))
+filtered_datasets$gene_score <- factor(filtered_datasets$gene_score, 
+                                       levels = c("HV gene", "HD gene", "HJ gene"))
+
+# Create the grid of plots
+plots <- filtered_datasets %>%
+  ggplot(aes(x = perc_mutations, y = alignment_score)) + 
+  geom_point(color = "grey50", alpha = .1) + 
+  geom_smooth(aes(color = preprocessing), method = "lm") +
+  stat_cor(p.accuracy = 0.0001, r.accuracy = 0.01, label.x = 20, method = "pearson", label.sep = "\n", cor.coef.name = "r") +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 500)) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_color_manual(values = color_palette) +
+  facet_wrap(~ preprocessing + gene_score + gene_mutations, nrow = 2) +
+  labs(x = "Gene mutations (%)", y = "Alignment score") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        legend.position = "none")
+plots
+
+ggsave(path = result.dir, filename = "correlation_alignment_mutations.pdf", height = 5, width = 12)
+
+```
+
+## Correlation of somatic hypermutation and Phred score
+
+This code chunk examines the correlation between somatic hypermutation in the HV gene and Phred scores for the "scifer" and "unprocessed" preprocessing methods. It calculates Pearson correlation coefficients and visualizes the results with scatter plots.
+
+```{r cor_mutations_phred}
+merged_datasets <- data.table::rbindlist(list(scifer = scifer_aligned,
+                           unprocessed = unprocessed_aligned), idcol = "preprocessing") %>%
+  pivot_longer(cols = c("V_errors", "D_errors", "J_errors"), 
+               names_to = "gene_mutations", 
+               values_to = "number_mutations") %>% 
+  mutate(gene_mutations = plyr::mapvalues(gene_mutations, 
+                                      from = c("V_errors", "D_errors", "J_errors"),
+                                      to = c("HV mutations", "HD mutations", "HJ mutations")),
+         gene_mutations = factor(gene_mutations, levels = c("HV mutations", "HD mutations", "HJ mutations")),
+         comparator_score = paste(preprocessing,"number_mutations", sep = "_"))
+
+cor_phred_score <- hc_quality_cluster %>%
+  right_join(merged_datasets %>% mutate(sequence_id = gsub("_PreF|_PostF|_NA", "", sequence_id)),  by = "sequence_id")
+
+
+cor_phred_score %>% 
+  filter(gene_mutations == "HV mutations") %>% 
+  ggplot(aes(x = number_mutations, y = raw.mean.quality)) + 
+  geom_point(color = "grey50", alpha = .1) + 
+  geom_smooth(aes(color = preprocessing), method = "lm") +
+  stat_cor(p.accuracy = 0.0001, r.accuracy = 0.01, label.x = 60, method = "pearson", label.sep = "\n", cor.coef.name = "r") +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_color_manual(values = color_palette) +
+  facet_wrap(~ preprocessing + gene_mutations, nrow = 1) +
+  labs(x = "HV gene mutations (#)", y = "Mean Phred score") +
+  theme_prism(base_fontface = "plain", border = TRUE, base_line_size = 1) +
+  theme(axis.ticks = element_line(linewidth = .5),
+        aspect.ratio = 1,
+        legend.title = element_text(size = 12),
+        legend.position = "none")
+
+ggsave(path = result.dir, filename = "correlation_alignment_HVmutation.pdf", height = 5, width = 5)
+```
+
+# Session info
+
+```{r session_info}
+sessionInfo()
+```

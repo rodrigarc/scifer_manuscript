@@ -1,0 +1,18 @@
+channels:
+  - conda-forge
+  - bioconda
+  - R
+  - defaults
+dependencies:
+  - r-base=4.2.2
+  - bioconductor-scifer
+  - r-dplyr
+  - r-cluster
+  - r-factoextra
+  - r-ggsci
+  - r-tidyr
+  - r-microbenchmark
+  - r-ggpubr
+  - r-rstatix
+  - r-ggprism
+  - r-here
