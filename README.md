@@ -49,7 +49,7 @@ To rerun the analysis, please clone this repo and check the required programs ab
 cd ~/Desktop
 # download the necessary processed data present in the zenodo repo
 # download via browser searching for  accession 8399141 on zenodo website or use curl/wget on the terminal
-wget -O scifer_manuscript.zip https://zenodo.org/record/8399141/files/scifer_manuscript_0-9-0.zip?download=1
+wget -O scifer_manuscript.zip https://zenodo.org/record/8399141/files/scifer_manuscript_zenodo1.zip?download=1
 # unzip the repository using your preferred unzipper
 unzip scifer_manuscript.zip
 
