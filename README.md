@@ -30,7 +30,7 @@ The sequencing data was taken from a previous project [found in Zenodo](https://
 
 ## Repository structure
  - `src` folder: contains all the source code used for the preprocessing and analysis.
- - `rabies_mRNA.Rproj` file: contains the R project to be open within RStudio for reproducibility purposes.
+ - `scifer_manuscript.Rproj` file: contains the R project to be open within RStudio for reproducibility purposes.
  - `renv` folder: contains the files generated when renv is initiated. 
  - `renv.lock` filer: contains the package versions and dependencies used to generate the plots.
  
